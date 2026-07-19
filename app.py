@@ -10,6 +10,7 @@ import io
 import os
 import sys
 import tempfile
+from reconcile.matcher_exact import diagnose_unmatched
 import hashlib
 from datetime import datetime
 
@@ -384,6 +385,11 @@ def run_pipeline():
     bank = deduplicate(bank, "Bank statement")
     ledger = normalize(ledger_raw)
     ledger = deduplicate(ledger, "Ledger")
+     unmatched_reasons = diagnose_unmatched(
+        bank,
+        ledger,
+        date_window_days=date_window_exact
+    )
 
     matcher_exact.DATE_WINDOW_DAYS = date_window_exact
     matcher_fuzzy.AMOUNT_TOLERANCE_PCT = amount_tol_pct / 100.0
@@ -415,13 +421,7 @@ def run_pipeline():
 
     bank = categorize(bank, use_llm=use_llm_categorize and llm_provider and llm_available(llm_provider), provider=llm_provider)
 
-   from reconcile.matcher_exact import diagnose_unmatched
-
-unmatched_reasons = diagnose_unmatched(
-    bank,
-    ledger,
-    date_window_days=date_window_exact
-)
+   
 
     return {
         "bank": bank, "ledger": ledger, "matches": matches, "llm_log": llm_log,
