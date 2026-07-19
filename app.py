@@ -385,7 +385,7 @@ def run_pipeline():
     bank = deduplicate(bank, "Bank statement")
     ledger = normalize(ledger_raw)
     ledger = deduplicate(ledger, "Ledger")
-     unmatched_reasons = diagnose_unmatched(
+    unmatched_reasons = diagnose_unmatched(
         bank,
         ledger,
         date_window_days=date_window_exact
