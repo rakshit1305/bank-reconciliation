@@ -194,6 +194,20 @@ with st.sidebar:
         st.info("Using bundled sample_data/ — small demo files.", icon="ℹ️")
 
     st.markdown("---")
+    st.markdown("---")
+    st.markdown("**1a · Ledger credit/debit convention**")
+    sign_convention_choice = st.radio(
+        "Sign convention",
+        ["Auto-detect (recommended)", "Force flip", "Force no flip"],
+        label_visibility="collapsed",
+        help="Some ledgers record their own bank account from a standard accounting "
+             "perspective (money in = debit) — the opposite of how the bank statement "
+             "itself labels the same transaction (money in = credit). Auto-detect tries "
+             "both orientations and keeps whichever produces more matches. Use the "
+             "manual options only if auto-detect gets it wrong for a specific file.",
+    )
+
+    st.markdown("---")
     st.markdown("**2 · Matching thresholds**")
     date_window_exact = st.slider(
         "Exact match — date window (days)",
@@ -257,6 +271,54 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+def _detect_and_fix_ledger_sign_convention(bank_raw, ledger_raw, override: str = "auto"):
+    """Some ledgers record their OWN bank account from a standard
+    double-entry accounting perspective, where the bank account is an
+    asset -- money coming IN is a DEBIT to that asset, money going OUT
+    is a CREDIT. This is the exact opposite of how the bank's own
+    statement labels the same transaction (money in = credit, from the
+    bank's perspective, since the bank owes the customer more).
+
+    Left unhandled, this makes every genuinely matching pair fail the
+    is_credit equality check in the matchers, even though amount, date,
+    and description all agree -- producing near-zero matches on an
+    otherwise perfectly reconcilable file.
+
+    override: "auto" (default) runs the empirical trial below. "flip" or
+    "no_flip" skips detection entirely and does what it says -- for the
+    rare case where auto-detect gets it wrong on a specific file and the
+    user needs a manual escape hatch.
+
+    Detected empirically rather than assumed: runs a cheap exact-match
+    trial under both the as-loaded orientation and a sign-flipped
+    orientation, and keeps whichever produces meaningfully more
+    matches. Returns (ledger_raw_to_use, was_flipped: bool).
+    """
+    if override == "flip":
+        ledger_flipped = ledger_raw.copy()
+        ledger_flipped["amount"] = -ledger_flipped["amount"]
+        return ledger_flipped, True
+    if override == "no_flip":
+        return ledger_raw, False
+
+    def trial_count(ledger_df):
+        b = deduplicate(normalize(bank_raw.copy()), "sign-detect-trial")
+        l = deduplicate(normalize(ledger_df.copy()), "sign-detect-trial")
+        return len(matcher_exact.run_exact_matching(b, l))
+
+    count_normal = trial_count(ledger_raw)
+
+    ledger_flipped = ledger_raw.copy()
+    ledger_flipped["amount"] = -ledger_flipped["amount"]
+    count_flipped = trial_count(ledger_flipped)
+
+    # Only flip on a clear, meaningful improvement -- avoids flip-
+    # flopping on noise for files where neither orientation matches well.
+    if count_flipped > max(count_normal * 1.5, 5) and count_flipped > count_normal:
+        return ledger_flipped, True
+    return ledger_raw, False
+
+
 def run_pipeline():
     if data_source == "Upload my own files":
         if not bank_files or not ledger_files:
@@ -309,6 +371,15 @@ def run_pipeline():
         bank_style = bank_raw.attrs.get("detected_amount_style", "unknown")
         ledger_style = ledger_raw.attrs.get("detected_amount_style", "unknown")
 
+    override_map = {
+        "Auto-detect (recommended)": "auto",
+        "Force flip": "flip",
+        "Force no flip": "no_flip",
+    }
+    ledger_raw, sign_convention_flipped = _detect_and_fix_ledger_sign_convention(
+        bank_raw, ledger_raw, override=override_map.get(sign_convention_choice, "auto")
+    )
+
     bank = normalize(bank_raw)
     bank = deduplicate(bank, "Bank statement")
     ledger = normalize(ledger_raw)
@@ -344,9 +415,13 @@ def run_pipeline():
 
     bank = categorize(bank, use_llm=use_llm_categorize and llm_provider and llm_available(llm_provider), provider=llm_provider)
 
+    unmatched_reasons = matcher_exact.diagnose_unmatched(bank, ledger, date_window_days=date_window_exact)
+
     return {
         "bank": bank, "ledger": ledger, "matches": matches, "llm_log": llm_log,
         "llm_provider_warning": llm_provider_warning,
+        "sign_convention_flipped": sign_convention_flipped,
+        "unmatched_reasons": unmatched_reasons,
         "run_at": datetime.now(), "bank_style": bank_style, "ledger_style": ledger_style,
     }
 
@@ -390,6 +465,15 @@ if not res:
 
 if res.get("llm_provider_warning"):
     st.warning(res["llm_provider_warning"], icon="⚠️")
+
+if res.get("sign_convention_flipped"):
+    st.info(
+        "Detected that your ledger records this bank account from a standard accounting "
+        "perspective (money in = debit, money out = credit) — the opposite of how the bank "
+        "statement itself labels the same transactions. Automatically corrected before matching, "
+        "based on which orientation actually produced more matches.",
+        icon="🔁",
+    )
 
 # ---------------------------------------------------------------------------
 # Detection confirmation — "is this actually the bank statement or ledger?"
@@ -442,7 +526,7 @@ matched_bank_rows = set(bank_f[bank_f["matched"]]["source_row"])
 matches_f = [m for m in matches if m["bank_row"] in set(bank_f["source_row"])]
 
 
-def render_dashboard(bank_f, matches_f, ledger, key_prefix):
+def render_dashboard(bank_f, matches_f, ledger, key_prefix, unmatched_reasons=None):
     n_bank = len(bank_f)
     n_matched = len(matches_f)
     matched_rows = set(bank_f[bank_f["matched"]]["source_row"])
@@ -562,6 +646,8 @@ def render_dashboard(bank_f, matches_f, ledger, key_prefix):
         cols_show = [c for c in ["source_row", "date", "description", "amount", "reference", "category", "department"] if c in bank_f.columns]
         bo = bank_f[~bank_f["matched"]][cols_show].copy()
         bo["date"] = bo["date"].dt.strftime("%d %b %Y")
+        if unmatched_reasons:
+            bo["likely_reason"] = bank_f[~bank_f["matched"]].index.map(lambda i: unmatched_reasons.get(i, ""))
         st.dataframe(bo.sort_values("amount", key=abs, ascending=False), width='stretch', hide_index=True)
 
     with tab_lo:
@@ -593,14 +679,14 @@ def render_dashboard(bank_f, matches_f, ledger, key_prefix):
 if has_departments and len(selected_departments) > 1:
     dept_tabs = st.tabs(["🌐 All departments"] + [f"🏷️ {d}" for d in selected_departments])
     with dept_tabs[0]:
-        render_dashboard(bank_f, matches_f, ledger, "all")
+        render_dashboard(bank_f, matches_f, ledger, "all", unmatched_reasons=res.get("unmatched_reasons"))
     for i, dept in enumerate(selected_departments, start=1):
         with dept_tabs[i]:
             bank_dept = bank_f[bank_f["department"] == dept]
             matches_dept = [m for m in matches_f if m["bank_row"] in set(bank_dept["source_row"])]
-            render_dashboard(bank_dept, matches_dept, ledger, f"dept_{dept}")
+            render_dashboard(bank_dept, matches_dept, ledger, f"dept_{dept}", unmatched_reasons=res.get("unmatched_reasons"))
 else:
-    render_dashboard(bank_f, matches_f, ledger, "single")
+    render_dashboard(bank_f, matches_f, ledger, "single", unmatched_reasons=res.get("unmatched_reasons"))
 
 # ---------------------------------------------------------------------------
 # Download
