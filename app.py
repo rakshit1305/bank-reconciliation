@@ -415,7 +415,9 @@ def run_pipeline():
 
     bank = categorize(bank, use_llm=use_llm_categorize and llm_provider and llm_available(llm_provider), provider=llm_provider)
 
-    unmatched_reasons = diagnose_unmatched(
+   from reconcile.matcher_exact import diagnose_unmatched
+
+unmatched_reasons = diagnose_unmatched(
     bank,
     ledger,
     date_window_days=date_window_exact
