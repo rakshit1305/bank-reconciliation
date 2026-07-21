@@ -115,7 +115,15 @@ def load_ledger_excel(path: str, sheet_name=0) -> pd.DataFrame:
 
 _AUTO_KEYWORDS = {
     "date": ["date", "txn date", "value date", "posting date", "transaction date"],
-    "description": ["description", "narration", "particulars", "details", "remarks"],
+    # "narrative" (not just "narration") and "particular" (singular, not just
+    # "particulars") are both real-world header spellings that used to slip
+    # through — "narration" is not a substring of "narrative" and
+    # "particulars" is not a substring of "particular", so plain substring
+    # matching silently missed both until they were added explicitly here.
+    "description": [
+        "description", "narration", "narrative", "particulars", "particular",
+        "details", "remarks",
+    ],
     "amount": ["amount", "amt", "transaction amount"],
     "reference": ["reference", "ref", "ref no", "refno", "chq", "utr", "cheque", "transaction id", "txn id"],
     # Deposit/withdrawal and credit/debit are checked as PAIRS, not single columns
@@ -388,7 +396,14 @@ def load_source_auto(file_obj_or_path, source_name: str, preferred_map: dict = N
     Credit/Debit vs Deposit/Withdrawal vs single Amount — that's fine,
     each sheet is auto-detected on its own) and stacked into one
     DataFrame with a 'department' column set to the sheet name. This is
-    what powers the per-department tabs in the dashboard."""
+    what powers the per-department tabs in the dashboard.
+
+    If EVERY sheet fails to parse, the raised error includes the specific
+    per-sheet reason (not just a generic "none could be parsed") so the
+    real cause — e.g. an unrecognized header like "Narrative" instead of
+    "Narration" — is visible immediately instead of requiring a trip
+    through the logs.
+    """
     sheets = list_sheets(file_obj_or_path)
 
     if len(sheets) <= 1:
@@ -398,18 +413,24 @@ def load_source_auto(file_obj_or_path, source_name: str, preferred_map: dict = N
 
     frames = []
     detected_styles = {}
+    skip_reasons = {}
     for sheet in sheets:
         try:
             df_sheet = load_flexible(file_obj_or_path, f"{source_name} [{sheet}]", None, sheet_name=sheet)
         except ValueError as e:
             print(f"WARNING: skipping sheet '{sheet}' in {source_name} — {e}")
+            skip_reasons[sheet] = str(e)
             continue
         df_sheet["department"] = sheet
         detected_styles[sheet] = df_sheet.attrs.get("detected_amount_style", "unknown")
         frames.append(df_sheet)
 
     if not frames:
-        raise ValueError(f"{source_name}: none of the {len(sheets)} sheet(s) could be parsed.")
+        detail = " | ".join(f"'{sheet}': {reason}" for sheet, reason in skip_reasons.items())
+        raise ValueError(
+            f"{source_name}: none of the {len(sheets)} sheet(s) could be parsed. "
+            f"Reasons — {detail}"
+        )
 
     combined = pd.concat(frames, ignore_index=True)
     combined["source_row"] = combined.index + 2
